@@ -1,0 +1,200 @@
+name: Deploy Service
+
+on:
+  push:
+    tags:
+      - api-v*
+      - worker-v*
+      - all-v*
+      - api/*
+      - worker/*
+      - all/*
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service to deploy
+        required: true
+        type: choice
+        options:
+          - api
+          - worker
+          - all
+        default: api
+      ref:
+        description: Branch, tag, or commit SHA from overdev-team/huayangai
+        required: true
+        default: main
+      run_tests:
+        description: Run Go tests before deploy
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-${{ github.ref_name || inputs.service }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      services: ${{ steps.resolve.outputs.services }}
+      run_tests: ${{ steps.resolve.outputs.run_tests }}
+    steps:
+      - id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            ref="${{ inputs.ref }}"
+            service="${{ inputs.service }}"
+            run_tests="${{ inputs.run_tests }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            ref="$tag"
+            run_tests="true"
+            case "$tag" in
+              api-v*|api/*) service="api" ;;
+              worker-v*|worker/*) service="worker" ;;
+              all-v*|all/*) service="all" ;;
+              *)
+                echo "Unsupported deploy tag: $tag" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          case "$service" in
+            api) services='["api"]' ;;
+            worker) services='["worker"]' ;;
+            all) services='["api","worker"]' ;;
+            *)
+              echo "Unsupported service: $service" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+          echo "run_tests=$run_tests" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.resolve.outputs.services) }}
+
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@v4
+        with:
+          repository: overdev-team/huayangai
+          ref: ${{ needs.resolve.outputs.ref }}
+          ssh-key: ${{ secrets.CODE_REPO_SSH_KEY }}
+          path: app
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: app/apps/api/go.mod
+          cache-dependency-path: app/apps/api/go.sum
+
+      - name: Test API module
+        if: ${{ needs.resolve.outputs.run_tests == 'true' }}
+        working-directory: app
+        run: go -C apps/api test ./...
+
+      - name: Build ${{ matrix.service }} binary
+        working-directory: app
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+          case "$SERVICE" in
+            api|worker) cmd="./cmd/${SERVICE}" ;;
+            *)
+              echo "Unsupported service: $SERVICE" >&2
+              exit 1
+              ;;
+          esac
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go -C apps/api build -trimpath -ldflags="-s -w" \
+            -o "/tmp/huayangai-${SERVICE}" "$cmd"
+          file "/tmp/huayangai-${SERVICE}"
+
+      - name: Resolve ${{ matrix.service }} target
+        id: target
+        env:
+          SERVICE: ${{ matrix.service }}
+          API_HOST: ${{ vars.API_ECS_HOST || vars.ECS_HOST }}
+          API_USER: ${{ vars.API_ECS_USER || vars.ECS_USER }}
+          API_KEY: ${{ secrets.API_ECS_DEPLOY_SSH_KEY || secrets.ECS_DEPLOY_SSH_KEY }}
+          API_SCRIPT: ${{ vars.API_DEPLOY_SCRIPT || '/usr/local/bin/deploy-taro-miniapp-api' }}
+          WORKER_HOST: ${{ vars.WORKER_ECS_HOST }}
+          WORKER_USER: ${{ vars.WORKER_ECS_USER }}
+          WORKER_KEY: ${{ secrets.WORKER_ECS_DEPLOY_SSH_KEY }}
+          WORKER_SCRIPT: ${{ vars.WORKER_DEPLOY_SCRIPT || '/usr/local/bin/deploy-taro-miniapp-worker' }}
+        run: |
+          set -euo pipefail
+
+          case "$SERVICE" in
+            api)
+              host="$API_HOST"
+              user="$API_USER"
+              key="$API_KEY"
+              script="$API_SCRIPT"
+              ;;
+            worker)
+              host="$WORKER_HOST"
+              user="$WORKER_USER"
+              key="$WORKER_KEY"
+              script="$WORKER_SCRIPT"
+              ;;
+          esac
+
+          if [[ -z "$host" || -z "$user" || -z "$key" || -z "$script" ]]; then
+            echo "Missing deploy config for service: $SERVICE" >&2
+            echo "Required vars/secrets are documented in README.md." >&2
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$key" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts
+
+          {
+            echo "host=$host"
+            echo "user=$user"
+            echo "script=$script"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload and deploy ${{ matrix.service }}
+        env:
+          SERVICE: ${{ matrix.service }}
+          SSH_HOST: ${{ steps.target.outputs.host }}
+          SSH_USER: ${{ steps.target.outputs.user }}
+          DEPLOY_SCRIPT: ${{ steps.target.outputs.script }}
+          REF_NAME: ${{ needs.resolve.outputs.ref }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          safe_ref="$(printf '%s' "$REF_NAME" | tr '/:@ ' '----')"
+          remote_artifact="/tmp/huayangai-${SERVICE}-${safe_ref}-${RUN_ID}"
+
+          scp -i ~/.ssh/deploy_key "/tmp/huayangai-${SERVICE}" \
+            "${SSH_USER}@${SSH_HOST}:${remote_artifact}"
+          ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
+            "sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
+
+      - name: Verify API public health endpoint
+        if: ${{ matrix.service == 'api' }}
+        env:
+          API_HOST: ${{ steps.target.outputs.host }}
+        run: curl -fsS "http://${API_HOST}/health"
