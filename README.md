@@ -19,23 +19,29 @@ Because this workflow lives in the CI repository, GitHub only triggers it from t
 Use the same tag name in the application repository and the CI repository:
 
 ```bash
-# Deploy API only
-git tag api-v2026.06.20-1
-git push git@github.com:overdev-team/huayangai.git api-v2026.06.20-1
-git push git@github.com:overdev-l/huayangai-ci.git api-v2026.06.20-1
+# Example: deploy API only.
+TAG=api-v2026.06.20-1
 
-# Deploy worker only
-git tag worker-v2026.06.20-1
-git push git@github.com:overdev-team/huayangai.git worker-v2026.06.20-1
-git push git@github.com:overdev-l/huayangai-ci.git worker-v2026.06.20-1
+# 1. Tag and push the application release.
+cd /path/to/huayangai
+git tag "$TAG"
+git push origin "$TAG"
 
-# Deploy both API and worker
-git tag all-v2026.06.20-1
-git push git@github.com:overdev-team/huayangai.git all-v2026.06.20-1
-git push git@github.com:overdev-l/huayangai-ci.git all-v2026.06.20-1
+# 2. Trigger CI with a same-named tag in the CI repository.
+# Do not push the application tag object directly to the CI repository.
+cd /path/to/huayangai-ci
+git fetch origin main
+git tag "$TAG" origin/main
+git push origin "$TAG"
 ```
 
 The CI workflow checks out `overdev-team/huayangai` at the triggering tag name. If the tag exists only in the CI repository and not in the application repository, checkout will fail.
+
+Use the tag prefix to select services:
+
+- `api-v2026.06.20-1`: deploy API only.
+- `worker-v2026.06.20-1`: deploy worker only.
+- `all-v2026.06.20-1`: deploy both API and worker.
 
 Slash-style tags are also supported:
 
