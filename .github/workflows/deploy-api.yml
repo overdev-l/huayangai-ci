@@ -1,0 +1,80 @@
+name: Deploy API
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit SHA from overdev-team/huayangai
+        required: true
+        default: main
+      run_tests:
+        description: Run Go tests before deploy
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@v4
+        with:
+          repository: overdev-team/huayangai
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.CODE_REPO_SSH_KEY }}
+          path: app
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: app/apps/api/go.mod
+          cache-dependency-path: app/apps/api/go.sum
+
+      - name: Test API
+        if: ${{ inputs.run_tests }}
+        working-directory: app
+        run: go -C apps/api test ./...
+
+      - name: Build API binary
+        working-directory: app
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go -C apps/api build -trimpath -ldflags="-s -w" \
+            -o /tmp/huayangai-api ./cmd/api
+          file /tmp/huayangai-api
+
+      - name: Configure ECS SSH key
+        env:
+          ECS_DEPLOY_SSH_KEY: ${{ secrets.ECS_DEPLOY_SSH_KEY }}
+          ECS_HOST: ${{ vars.ECS_HOST }}
+        run: |
+          test -n "$ECS_HOST"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ECS_DEPLOY_SSH_KEY" > ~/.ssh/ecs_deploy_key
+          chmod 600 ~/.ssh/ecs_deploy_key
+          ssh-keyscan -H "$ECS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload and deploy
+        env:
+          ECS_HOST: ${{ vars.ECS_HOST }}
+          ECS_USER: ${{ vars.ECS_USER }}
+          GITHUB_SHA_VALUE: ${{ github.sha }}
+        run: |
+          test -n "$ECS_HOST"
+          test -n "$ECS_USER"
+          remote_artifact="/tmp/huayangai-api-${GITHUB_SHA_VALUE}"
+          scp -i ~/.ssh/ecs_deploy_key /tmp/huayangai-api "${ECS_USER}@${ECS_HOST}:${remote_artifact}"
+          ssh -i ~/.ssh/ecs_deploy_key "${ECS_USER}@${ECS_HOST}" \
+            "sudo /usr/local/bin/deploy-taro-miniapp-api '${remote_artifact}'"
+
+      - name: Verify public health endpoint
+        env:
+          ECS_HOST: ${{ vars.ECS_HOST }}
+        run: curl -fsS "http://${ECS_HOST}/health"
