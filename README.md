@@ -14,21 +14,28 @@ CI/deploy repository:
 
 Workflow: `.github/workflows/deploy-service.yml`
 
-Create and push a tag in the application repository to deploy:
+Because this workflow lives in the CI repository, GitHub only triggers it from tags pushed to `overdev-l/huayangai-ci`.
+
+Use the same tag name in the application repository and the CI repository:
 
 ```bash
 # Deploy API only
 git tag api-v2026.06.20-1
-git push origin api-v2026.06.20-1
+git push git@github.com:overdev-team/huayangai.git api-v2026.06.20-1
+git push git@github.com:overdev-l/huayangai-ci.git api-v2026.06.20-1
 
 # Deploy worker only
 git tag worker-v2026.06.20-1
-git push origin worker-v2026.06.20-1
+git push git@github.com:overdev-team/huayangai.git worker-v2026.06.20-1
+git push git@github.com:overdev-l/huayangai-ci.git worker-v2026.06.20-1
 
 # Deploy both API and worker
 git tag all-v2026.06.20-1
-git push origin all-v2026.06.20-1
+git push git@github.com:overdev-team/huayangai.git all-v2026.06.20-1
+git push git@github.com:overdev-l/huayangai-ci.git all-v2026.06.20-1
 ```
+
+The CI workflow checks out `overdev-team/huayangai` at the triggering tag name. If the tag exists only in the CI repository and not in the application repository, checkout will fail.
 
 Slash-style tags are also supported:
 
