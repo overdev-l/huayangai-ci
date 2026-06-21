@@ -138,6 +138,8 @@ Keep each environment/service isolated:
 | prod API | `huayangai-prod-api.service` | `/etc/huayangai/prod.yaml` | `/opt/huayangai/prod/api` |
 | prod worker | `huayangai-prod-worker.service` | `/etc/huayangai/prod.yaml` | `/opt/huayangai/prod/worker` |
 
+The deploy workflow also copies the selected YAML to `config.yaml` under the target service working directory, so the binary can start even when the systemd unit does not export an environment selector.
+
 The generic helper script is in `scripts/deploy-systemd-binary.sh`. Install it on each server as:
 
 ```bash

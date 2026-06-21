@@ -264,7 +264,7 @@ jobs:
           scp -i ~/.ssh/deploy_key "$config_file" \
             "${SSH_USER}@${SSH_HOST}:${remote_config}"
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
-            "sudo install -D -m 600 '${remote_config}' '/etc/huayangai/${ENVIRONMENT}.yaml' && sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
+            "service_name='huayangai-${ENVIRONMENT}-${SERVICE}.service'; work_dir=\$(systemctl show \"\$service_name\" -p WorkingDirectory --value); sudo install -D -m 600 '${remote_config}' '/etc/huayangai/${ENVIRONMENT}.yaml'; if [ -n \"\$work_dir\" ] && [ \"\$work_dir\" != '/' ]; then sudo install -D -m 600 -o app -g app '${remote_config}' \"\$work_dir/config.yaml\"; fi; sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
 
       - name: Verify ${{ matrix.target.environment }} API public health endpoint
         if: ${{ matrix.target.service == 'api' }}
