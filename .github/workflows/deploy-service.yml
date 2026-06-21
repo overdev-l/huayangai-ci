@@ -251,11 +251,20 @@ jobs:
           set -euo pipefail
           safe_ref="$(printf '%s' "$REF_NAME" | tr '/:@ ' '----')"
           remote_artifact="/tmp/huayangai-${ENVIRONMENT}-${SERVICE}-${safe_ref}-${RUN_ID}"
+          remote_config="/tmp/huayangai-${ENVIRONMENT}-config-${safe_ref}-${RUN_ID}.yaml"
+          config_file="app/config/${ENVIRONMENT}.yaml"
+
+          if [[ ! -f "$config_file" ]]; then
+            echo "Missing config file: $config_file" >&2
+            exit 1
+          fi
 
           scp -i ~/.ssh/deploy_key "/tmp/huayangai-${SERVICE}" \
             "${SSH_USER}@${SSH_HOST}:${remote_artifact}"
+          scp -i ~/.ssh/deploy_key "$config_file" \
+            "${SSH_USER}@${SSH_HOST}:${remote_config}"
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
-            "sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
+            "sudo install -D -m 600 '${remote_config}' '/etc/huayangai/${ENVIRONMENT}.yaml' && sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
 
       - name: Verify ${{ matrix.target.environment }} API public health endpoint
         if: ${{ matrix.target.service == 'api' }}
