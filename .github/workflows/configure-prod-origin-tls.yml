@@ -11,7 +11,7 @@ jobs:
       - name: Configure nginx origin TLS on prod API host
         env:
           SSH_HOST: ${{ vars.PROD_API_ECS_HOST || vars.API_ECS_HOST || vars.ECS_HOST }}
-          SSH_USER: ${{ vars.PROD_API_ECS_USER || vars.API_ECS_USER || vars.ECS_USER }}
+          SSH_USER: ${{ vars.API_ECS_USER || vars.ECS_USER || vars.PROD_API_ECS_USER }}
           SSH_KEY: ${{ secrets.API_ECS_DEPLOY_SSH_KEY || secrets.ECS_DEPLOY_SSH_KEY }}
         run: |
           set -euo pipefail
