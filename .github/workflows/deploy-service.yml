@@ -3,6 +3,19 @@ name: Deploy Service
 on:
   push:
     tags:
+      - pre-api-v*
+      - pre-worker-v*
+      - pre-all-v*
+      - prod-api-v*
+      - prod-worker-v*
+      - prod-all-v*
+      - pre/api/*
+      - pre/worker/*
+      - pre/all/*
+      - prod/api/*
+      - prod/worker/*
+      - prod/all/*
+      # Legacy tags remain supported and deploy to production.
       - api-v*
       - worker-v*
       - all-v*
@@ -11,6 +24,14 @@ on:
       - all/*
   workflow_dispatch:
     inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - pre
+          - prod
+        default: pre
       service:
         description: Service to deploy
         required: true
@@ -31,7 +52,7 @@ on:
         default: true
 
 concurrency:
-  group: deploy-${{ github.ref_name || inputs.service }}
+  group: deploy-${{ github.ref_name || inputs.environment }}-${{ inputs.service || 'tag' }}
   cancel-in-progress: false
 
 jobs:
@@ -39,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}
-      services: ${{ steps.resolve.outputs.services }}
+      targets: ${{ steps.resolve.outputs.targets }}
       run_tests: ${{ steps.resolve.outputs.run_tests }}
     steps:
       - id: resolve
@@ -49,6 +70,7 @@ jobs:
 
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             ref="${{ inputs.ref }}"
+            environment="${{ inputs.environment }}"
             service="${{ inputs.service }}"
             run_tests="${{ inputs.run_tests }}"
           else
@@ -56,9 +78,15 @@ jobs:
             ref="$tag"
             run_tests="true"
             case "$tag" in
-              api-v*|api/*) service="api" ;;
-              worker-v*|worker/*) service="worker" ;;
-              all-v*|all/*) service="all" ;;
+              pre-api-v*|pre/api/*) environment="pre"; service="api" ;;
+              pre-worker-v*|pre/worker/*) environment="pre"; service="worker" ;;
+              pre-all-v*|pre/all/*) environment="pre"; service="all" ;;
+              prod-api-v*|prod/api/*) environment="prod"; service="api" ;;
+              prod-worker-v*|prod/worker/*) environment="prod"; service="worker" ;;
+              prod-all-v*|prod/all/*) environment="prod"; service="all" ;;
+              api-v*|api/*) environment="prod"; service="api" ;;
+              worker-v*|worker/*) environment="prod"; service="worker" ;;
+              all-v*|all/*) environment="prod"; service="all" ;;
               *)
                 echo "Unsupported deploy tag: $tag" >&2
                 exit 1
@@ -66,10 +94,24 @@ jobs:
             esac
           fi
 
+          case "$environment" in
+            pre|prod) ;;
+            *)
+              echo "Unsupported environment: $environment" >&2
+              exit 1
+              ;;
+          esac
+
           case "$service" in
-            api) services='["api"]' ;;
-            worker) services='["worker"]' ;;
-            all) services='["api","worker"]' ;;
+            api)
+              targets='[{"environment":"'"$environment"'","service":"api"}]'
+              ;;
+            worker)
+              targets='[{"environment":"'"$environment"'","service":"worker"}]'
+              ;;
+            all)
+              targets='[{"environment":"'"$environment"'","service":"api"},{"environment":"'"$environment"'","service":"worker"}]'
+              ;;
             *)
               echo "Unsupported service: $service" >&2
               exit 1
@@ -77,7 +119,7 @@ jobs:
           esac
 
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "services=$services" >> "$GITHUB_OUTPUT"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
           echo "run_tests=$run_tests" >> "$GITHUB_OUTPUT"
 
   deploy:
@@ -87,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: ${{ fromJSON(needs.resolve.outputs.services) }}
+        target: ${{ fromJSON(needs.resolve.outputs.targets) }}
 
     steps:
       - name: Checkout application repository
@@ -109,10 +151,15 @@ jobs:
         working-directory: app
         run: go -C apps/api test ./...
 
-      - name: Build ${{ matrix.service }} binary
+      - name: Build ${{ matrix.target.environment }} ${{ matrix.target.service }} binary
         working-directory: app
         env:
-          SERVICE: ${{ matrix.service }}
+          ENVIRONMENT: ${{ matrix.target.environment }}
+          SERVICE: ${{ matrix.target.service }}
+          PRE_API_GOARCH: ${{ vars.PRE_API_GOARCH || vars.SINGAPORE_GOARCH || 'arm64' }}
+          PRE_WORKER_GOARCH: ${{ vars.PRE_WORKER_GOARCH || vars.SINGAPORE_GOARCH || 'arm64' }}
+          PROD_API_GOARCH: ${{ vars.PROD_API_GOARCH || vars.ALIYUN_GOARCH || 'amd64' }}
+          PROD_WORKER_GOARCH: ${{ vars.PROD_WORKER_GOARCH || vars.SINGAPORE_GOARCH || 'arm64' }}
         run: |
           set -euo pipefail
           case "$SERVICE" in
@@ -123,43 +170,58 @@ jobs:
               ;;
           esac
 
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+          arch_var="$(printf '%s_%s_GOARCH' "$ENVIRONMENT" "$SERVICE" | tr '[:lower:]' '[:upper:]')"
+          goarch="${!arch_var:-amd64}"
+          CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
             go -C apps/api build -trimpath -ldflags="-s -w" \
             -o "/tmp/huayangai-${SERVICE}" "$cmd"
           file "/tmp/huayangai-${SERVICE}"
 
-      - name: Resolve ${{ matrix.service }} target
+      - name: Resolve ${{ matrix.target.environment }} ${{ matrix.target.service }} target
         id: target
         env:
-          SERVICE: ${{ matrix.service }}
-          API_HOST: ${{ vars.API_ECS_HOST || vars.ECS_HOST }}
-          API_USER: ${{ vars.API_ECS_USER || vars.ECS_USER }}
-          API_KEY: ${{ secrets.API_ECS_DEPLOY_SSH_KEY || secrets.ECS_DEPLOY_SSH_KEY }}
-          API_SCRIPT: ${{ vars.API_DEPLOY_SCRIPT || '/usr/local/bin/deploy-taro-miniapp-api' }}
-          WORKER_HOST: ${{ vars.WORKER_ECS_HOST }}
-          WORKER_USER: ${{ vars.WORKER_ECS_USER }}
-          WORKER_KEY: ${{ secrets.WORKER_ECS_DEPLOY_SSH_KEY }}
-          WORKER_SCRIPT: ${{ vars.WORKER_DEPLOY_SCRIPT || '/usr/local/bin/deploy-taro-miniapp-worker' }}
+          ENVIRONMENT: ${{ matrix.target.environment }}
+          SERVICE: ${{ matrix.target.service }}
+
+          PRE_API_HOST: ${{ vars.PRE_API_ECS_HOST || vars.SINGAPORE_ECS_HOST }}
+          PRE_API_USER: ${{ vars.PRE_API_ECS_USER || vars.SINGAPORE_ECS_USER || vars.ECS_USER }}
+          PRE_API_KEY: ${{ secrets.PRE_API_ECS_DEPLOY_SSH_KEY || secrets.SINGAPORE_ECS_DEPLOY_SSH_KEY || secrets.ECS_DEPLOY_SSH_KEY }}
+          PRE_API_SCRIPT: ${{ vars.PRE_API_DEPLOY_SCRIPT || '/usr/local/bin/deploy-huayangai-pre-api' }}
+          PRE_API_HEALTH_URL: ${{ vars.PRE_API_HEALTH_URL || 'https://pre-huyangai-api.overdev.cn/health' }}
+
+          PRE_WORKER_HOST: ${{ vars.PRE_WORKER_ECS_HOST || vars.SINGAPORE_ECS_HOST }}
+          PRE_WORKER_USER: ${{ vars.PRE_WORKER_ECS_USER || vars.SINGAPORE_ECS_USER || vars.ECS_USER }}
+          PRE_WORKER_KEY: ${{ secrets.PRE_WORKER_ECS_DEPLOY_SSH_KEY || secrets.SINGAPORE_ECS_DEPLOY_SSH_KEY || secrets.ECS_DEPLOY_SSH_KEY }}
+          PRE_WORKER_SCRIPT: ${{ vars.PRE_WORKER_DEPLOY_SCRIPT || '/usr/local/bin/deploy-huayangai-pre-worker' }}
+
+          PROD_API_HOST: ${{ vars.PROD_API_ECS_HOST || vars.ALIYUN_ECS_HOST || vars.API_ECS_HOST || vars.ECS_HOST }}
+          PROD_API_USER: ${{ vars.PROD_API_ECS_USER || vars.ALIYUN_ECS_USER || vars.API_ECS_USER || vars.ECS_USER }}
+          PROD_API_KEY: ${{ secrets.PROD_API_ECS_DEPLOY_SSH_KEY || secrets.ALIYUN_ECS_DEPLOY_SSH_KEY || secrets.API_ECS_DEPLOY_SSH_KEY || secrets.ECS_DEPLOY_SSH_KEY }}
+          PROD_API_SCRIPT: ${{ vars.PROD_API_DEPLOY_SCRIPT || '/usr/local/bin/deploy-huayangai-prod-api' }}
+          PROD_API_HEALTH_URL: ${{ vars.PROD_API_HEALTH_URL || 'https://huayangai-api.overdev.cn/health' }}
+
+          PROD_WORKER_HOST: ${{ vars.PROD_WORKER_ECS_HOST || vars.SINGAPORE_ECS_HOST || vars.WORKER_ECS_HOST }}
+          PROD_WORKER_USER: ${{ vars.PROD_WORKER_ECS_USER || vars.SINGAPORE_ECS_USER || vars.WORKER_ECS_USER || vars.ECS_USER }}
+          PROD_WORKER_KEY: ${{ secrets.PROD_WORKER_ECS_DEPLOY_SSH_KEY || secrets.SINGAPORE_ECS_DEPLOY_SSH_KEY || secrets.WORKER_ECS_DEPLOY_SSH_KEY || secrets.ECS_DEPLOY_SSH_KEY }}
+          PROD_WORKER_SCRIPT: ${{ vars.PROD_WORKER_DEPLOY_SCRIPT || '/usr/local/bin/deploy-huayangai-prod-worker' }}
         run: |
           set -euo pipefail
 
-          case "$SERVICE" in
-            api)
-              host="$API_HOST"
-              user="$API_USER"
-              key="$API_KEY"
-              script="$API_SCRIPT"
-              ;;
-            worker)
-              host="$WORKER_HOST"
-              user="$WORKER_USER"
-              key="$WORKER_KEY"
-              script="$WORKER_SCRIPT"
-              ;;
-          esac
+          prefix="$(printf '%s_%s' "$ENVIRONMENT" "$SERVICE" | tr '[:lower:]' '[:upper:]')"
+          host_var="${prefix}_HOST"
+          user_var="${prefix}_USER"
+          key_var="${prefix}_KEY"
+          script_var="${prefix}_SCRIPT"
+          health_var="${prefix}_HEALTH_URL"
+
+          host="${!host_var:-}"
+          user="${!user_var:-}"
+          key="${!key_var:-}"
+          script="${!script_var:-}"
+          health_url="${!health_var:-}"
 
           if [[ -z "$host" || -z "$user" || -z "$key" || -z "$script" ]]; then
-            echo "Missing deploy config for service: $SERVICE" >&2
+            echo "Missing deploy config for ${ENVIRONMENT} ${SERVICE}." >&2
             echo "Required vars/secrets are documented in README.md." >&2
             exit 1
           fi
@@ -173,11 +235,13 @@ jobs:
             echo "host=$host"
             echo "user=$user"
             echo "script=$script"
+            echo "health_url=$health_url"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Upload and deploy ${{ matrix.service }}
+      - name: Upload and deploy ${{ matrix.target.environment }} ${{ matrix.target.service }}
         env:
-          SERVICE: ${{ matrix.service }}
+          ENVIRONMENT: ${{ matrix.target.environment }}
+          SERVICE: ${{ matrix.target.service }}
           SSH_HOST: ${{ steps.target.outputs.host }}
           SSH_USER: ${{ steps.target.outputs.user }}
           DEPLOY_SCRIPT: ${{ steps.target.outputs.script }}
@@ -186,15 +250,38 @@ jobs:
         run: |
           set -euo pipefail
           safe_ref="$(printf '%s' "$REF_NAME" | tr '/:@ ' '----')"
-          remote_artifact="/tmp/huayangai-${SERVICE}-${safe_ref}-${RUN_ID}"
+          remote_artifact="/tmp/huayangai-${ENVIRONMENT}-${SERVICE}-${safe_ref}-${RUN_ID}"
+          remote_config="/tmp/huayangai-${ENVIRONMENT}-config-${safe_ref}-${RUN_ID}.yaml"
+          config_file="app/config/${ENVIRONMENT}.yaml"
+
+          if [[ ! -f "$config_file" ]]; then
+            echo "Missing config file: $config_file" >&2
+            exit 1
+          fi
 
           scp -i ~/.ssh/deploy_key "/tmp/huayangai-${SERVICE}" \
             "${SSH_USER}@${SSH_HOST}:${remote_artifact}"
+          scp -i ~/.ssh/deploy_key "$config_file" \
+            "${SSH_USER}@${SSH_HOST}:${remote_config}"
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
-            "sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
+            "service_name='huayangai-${ENVIRONMENT}-${SERVICE}.service'; work_dir=\$(systemctl show \"\$service_name\" -p WorkingDirectory --value); sudo install -D -m 600 '${remote_config}' '/etc/huayangai/${ENVIRONMENT}.yaml'; if [ -n \"\$work_dir\" ] && [ \"\$work_dir\" != '/' ]; then sudo install -D -m 600 -o app -g app '${remote_config}' \"\$work_dir/config.yaml\"; fi; sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
 
-      - name: Verify API public health endpoint
-        if: ${{ matrix.service == 'api' }}
+      - name: Verify ${{ matrix.target.environment }} API public health endpoint
+        if: ${{ matrix.target.service == 'api' }}
         env:
-          API_HOST: ${{ steps.target.outputs.host }}
-        run: curl -fsS "http://${API_HOST}/health"
+          HEALTH_URL: ${{ steps.target.outputs.health_url }}
+          ENVIRONMENT: ${{ matrix.target.environment }}
+          SSH_HOST: ${{ steps.target.outputs.host }}
+          SSH_USER: ${{ steps.target.outputs.user }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$HEALTH_URL" ]]; then
+            echo "API health URL is not configured." >&2
+            exit 1
+          fi
+          if ! curl -fsS "$HEALTH_URL"; then
+            service_name="huayangai-${ENVIRONMENT}-api"
+            ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
+              "sudo systemctl status '${service_name}' --no-pager -l || true; sudo journalctl -u '${service_name}' -n 80 --no-pager || true"
+            exit 1
+          fi
