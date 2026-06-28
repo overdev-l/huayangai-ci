@@ -252,7 +252,7 @@ jobs:
           safe_ref="$(printf '%s' "$REF_NAME" | tr '/:@ ' '----')"
           remote_artifact="/tmp/huayangai-${ENVIRONMENT}-${SERVICE}-${safe_ref}-${RUN_ID}"
           remote_config="/tmp/huayangai-${ENVIRONMENT}-config-${safe_ref}-${RUN_ID}.yaml"
-          config_file="app/config/${ENVIRONMENT}.yaml"
+          config_file="app/config/${SERVICE}.yaml"
 
           if [[ ! -f "$config_file" ]]; then
             echo "Missing config file: $config_file" >&2
@@ -264,7 +264,7 @@ jobs:
           scp -i ~/.ssh/deploy_key "$config_file" \
             "${SSH_USER}@${SSH_HOST}:${remote_config}"
           ssh -i ~/.ssh/deploy_key "${SSH_USER}@${SSH_HOST}" \
-            "service_name='huayangai-${ENVIRONMENT}-${SERVICE}.service'; work_dir=\$(systemctl show \"\$service_name\" -p WorkingDirectory --value); sudo install -D -m 600 '${remote_config}' '/etc/huayangai/${ENVIRONMENT}.yaml'; if [ -n \"\$work_dir\" ] && [ \"\$work_dir\" != '/' ]; then sudo install -D -m 600 -o app -g app '${remote_config}' \"\$work_dir/config.yaml\"; fi; sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
+            "service_name='huayangai-${ENVIRONMENT}-${SERVICE}.service'; work_dir=\$(systemctl show \"\$service_name\" -p WorkingDirectory --value); sudo install -D -m 600 '${remote_config}' '/etc/huayangai/${SERVICE}.yaml'; if [ -n \"\$work_dir\" ] && [ \"\$work_dir\" != '/' ]; then sudo install -D -m 600 -o app -g app '${remote_config}' \"\$work_dir/config.yaml\"; fi; sudo '${DEPLOY_SCRIPT}' '${remote_artifact}'"
 
       - name: Verify ${{ matrix.target.environment }} API public health endpoint
         if: ${{ matrix.target.service == 'api' }}
